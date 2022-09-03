@@ -221,28 +221,32 @@ int main(int argc, const char * argv[]) {
         if (argc < 2) {
           usage(argv[0]);
         }
+
         if (strcmp(argv[1], "setuid") == 0) {
           return setUid();
         }
+
         if (strcmp(argv[1], "show") == 0) {
-            return show();
-        }
-        if (argc < 4) {
+          return show();
+        } else {
+          if (argc < 4) {
             usage(argv[0]);
-        }
-        if (strcmp(argv[1], "on") == 0) {
+          }
+          proxyHost = argv[2];
+          proxyPort = argv[3];
+          if (strcmp(argv[1], "on") == 0) {
             return toggleProxy(true);
-        } else if (strcmp(argv[1], "off") == 0) {
+          } else if (strcmp(argv[1], "off") == 0) {
             return toggleProxy(false);
-        } else if (strcmp(argv[1], "wait-and-cleanup") == 0) {
+          } else if (strcmp(argv[1], "wait-and-cleanup") == 0) {
             setupSignals();
             // wait for input from stdin (or close), then toggle off
             getchar();
             return toggleProxy(false);
-        } else {
+          } else {
             usage(argv[0]);
+          }
         }
-      
         // code never reaches here, just avoids compiler from complaining.
         return RET_NO_ERROR;
     }
