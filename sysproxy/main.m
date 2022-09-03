@@ -1,39 +1,42 @@
+#import <Foundation/NSArray.h>
 #import <Foundation/Foundation.h>
-
 #import <SystemConfiguration/SCPreferences.h>
 #import <SystemConfiguration/SCNetworkConfiguration.h>
 
-#import <sys/stat.h>
-#import <mach-o/dyld.h>
+#include <sys/syslimits.h>
+#include <sys/stat.h>
+#include <mach-o/dyld.h>
+
+/* === implement details === */
+
+const char* proxyHost;
+const char* proxyPort;
 
 enum RET_ERRORS {
-    RET_NO_ERROR = 0,
-    INVALID_FORMAT = 1,
-    NO_PERMISSION = 2,
-    SYSCALL_FAILED = 3,
-    NO_MEMORY = 4
+  RET_NO_ERROR = 0,
+  INVALID_FORMAT = 1,
+  NO_PERMISSION = 2,
+  SYSCALL_FAILED = 3,
+  NO_MEMORY = 4
 };
 
-int setUid(void) {
-  char exeFullPath [PATH_MAX];
-  uint32_t size = PATH_MAX;
-  if (_NSGetExecutablePath(exeFullPath, &size) != 0) {
-    printf("Path longer than %d, should not occur!!!!!", size);
-    return SYSCALL_FAILED;
+typedef Boolean (*visitor) (SCNetworkProtocolRef proxyProtocolRef, NSDictionary* oldPreferences, bool turnOn);
+
+Boolean showAction(SCNetworkProtocolRef proxyProtocolRef /*unused*/, NSDictionary* oldPreferences, bool turnOn /*unused*/)
+{
+  NSNumber* on = [oldPreferences valueForKey:(NSString*)kSCPropNetProxiesHTTPEnable];
+  NSString* nsOldProxyHost = [oldPreferences valueForKey:(NSString*)kSCPropNetProxiesHTTPProxy];
+  NSNumber* nsOldProxyPort = [oldPreferences valueForKey:(NSString*)kSCPropNetProxiesHTTPPort];
+  if ([on intValue] == 1) {
+    printf("%s:%d\n", [nsOldProxyHost UTF8String], [nsOldProxyPort intValue]);
   }
-  // root:wheel
-  if (chown(exeFullPath, 0, 0) != 0) {
-    puts("Error chown");
-    return NO_PERMISSION;
-  }
-  if (chmod(exeFullPath, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH | S_ISUID) != 0) {
-    puts("Error chmod");
-    return NO_PERMISSION;
-  }
-  return RET_NO_ERROR;
+  return TRUE;
 }
 
-Boolean doSetSystemProxy(SCNetworkProtocolRef proxyProtocolRef, NSDictionary* oldPreferences, bool turnOn, NSString* nsProxyHost, NSNumber* nsProxyPort) {
+Boolean toggleAction(SCNetworkProtocolRef proxyProtocolRef, NSDictionary* oldPreferences, bool turnOn)
+{
+  NSString* nsProxyHost = [[NSString alloc] initWithCString: proxyHost encoding:NSUTF8StringEncoding];
+  NSNumber* nsProxyPort = [[NSNumber alloc] initWithLong: [[[NSString alloc] initWithCString: proxyPort encoding:NSUTF8StringEncoding] integerValue]];
   NSString* nsOldProxyHost;
   NSNumber* nsOldProxyPort;
   NSMutableDictionary *newPreferences = [NSMutableDictionary dictionaryWithDictionary: oldPreferences];
@@ -70,7 +73,8 @@ Boolean doSetSystemProxy(SCNetworkProtocolRef proxyProtocolRef, NSDictionary* ol
   return success;
 }
 
-int setSystemProxy(bool persist, bool turnOn, NSString* host, NSNumber* port) {
+int visit(visitor v, bool persist, bool turnOn)
+{
   int ret = RET_NO_ERROR;
   Boolean success;
 
@@ -119,9 +123,9 @@ int setSystemProxy(bool persist, bool turnOn, NSString* host, NSNumber* port) {
     }
 
     oldPreferences = (__bridge NSDictionary*)SCNetworkProtocolGetConfiguration(proxyProtocolRef);
-      if (!doSetSystemProxy(proxyProtocolRef, oldPreferences, turnOn, host, port)) {
-          ret = SYSCALL_FAILED;
-      }
+    if (!v(proxyProtocolRef, oldPreferences, turnOn)) {
+      ret = SYSCALL_FAILED;
+    }
 
 freeProxyProtocolRef:
     CFRelease(proxyProtocolRef);
@@ -155,35 +159,61 @@ freePrefsRef:
   return ret;
 }
 
-int show(NSDictionary* oldPreferences) {
-    NSNumber* on = [oldPreferences valueForKey:(NSString*)kSCPropNetProxiesHTTPEnable];
-    NSString* nsOldProxyHost = [oldPreferences valueForKey:(NSString*)kSCPropNetProxiesHTTPProxy];
-    NSNumber* nsOldProxyPort = [oldPreferences valueForKey:(NSString*)kSCPropNetProxiesHTTPPort];
-    if ([on intValue] == 1) {
-        printf("%s:%d\n", [nsOldProxyHost UTF8String], [nsOldProxyPort intValue]);
-    }
-    return TRUE;
+/* === public functions === */
+int setUid(void)
+{
+  char exeFullPath [PATH_MAX];
+  uint32_t size = PATH_MAX;
+  if (_NSGetExecutablePath(exeFullPath, &size) != 0)
+  {
+    printf("Path longer than %d, should not occur!!!!!", size);
+    return SYSCALL_FAILED;
+  }
+  if (chown(exeFullPath, 0, 0) != 0) // root:wheel
+  {
+    puts("Error chown");
+    return NO_PERMISSION;
+  }
+  if (chmod(exeFullPath, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH | S_ISUID) != 0)
+  {
+    puts("Error chmod");
+    return NO_PERMISSION;
+  }
+  return RET_NO_ERROR;
 }
 
-void turnOffProxyOnSignal(int signal) {
-    setSystemProxy(true, false, @"", 0);
-    exit(0);
+int show(void)
+{
+  return visit(&showAction, false, false /*unused*/);
 }
 
-void setupSignals(void) {
-    // Register signal handlers to make sure we turn proxy off no matter what
-    signal(SIGABRT, turnOffProxyOnSignal);
-    signal(SIGFPE, turnOffProxyOnSignal);
-    signal(SIGILL, turnOffProxyOnSignal);
-    signal(SIGINT, turnOffProxyOnSignal);
-    signal(SIGSEGV, turnOffProxyOnSignal);
-    signal(SIGTERM, turnOffProxyOnSignal);
-    signal(SIGSEGV, turnOffProxyOnSignal);
+int toggleProxy(bool turnOn)
+{
+  return visit(&toggleAction, true, turnOn);
 }
 
-void usage(const char* binName) {
-    printf("Usage: %s [on | off | wait-and-cleanup <proxy host> <proxy port>]\n", binName);
-    exit (1);
+void usage(const char* binName)
+{
+  printf("Usage: %s [show | on | off | wait-and-cleanup <proxy host> <proxy port>]\n", binName);
+  exit(INVALID_FORMAT);
+}
+
+void turnOffProxyOnSignal(int signal)
+{
+  toggleProxy(false);
+  exit(0);
+}
+
+void setupSignals(void)
+{
+  // Register signal handlers to make sure we turn proxy off no matter what
+  signal(SIGABRT, turnOffProxyOnSignal);
+  signal(SIGFPE, turnOffProxyOnSignal);
+  signal(SIGILL, turnOffProxyOnSignal);
+  signal(SIGINT, turnOffProxyOnSignal);
+  signal(SIGSEGV, turnOffProxyOnSignal);
+  signal(SIGTERM, turnOffProxyOnSignal);
+  signal(SIGSEGV, turnOffProxyOnSignal);
 }
 
 int main(int argc, const char * argv[]) {
@@ -195,32 +225,26 @@ int main(int argc, const char * argv[]) {
           return setUid();
         }
         if (strcmp(argv[1], "show") == 0) {
-            //setSystemProxy(false, false, @"", 0);
-            //show();
+            return show();
         }
         if (argc < 4) {
             usage(argv[0]);
         }
         if (strcmp(argv[1], "on") == 0) {
-            NSString* host = [NSString stringWithUTF8String:argv[2]];
-            NSString* portString = [NSString stringWithUTF8String:argv[3]];
-            NSNumberFormatter *f = [[NSNumberFormatter alloc] init];
-            NSNumber* port = [f numberFromString:portString];
-            printf("Setting system proxy %s:%d\n", [host UTF8String], [port intValue]);
-            setSystemProxy(true, true, host, port);
+            return toggleProxy(true);
         } else if (strcmp(argv[1], "off") == 0) {
-            return setSystemProxy(true, false, @"", 0);
+            return toggleProxy(false);
         } else if (strcmp(argv[1], "wait-and-cleanup") == 0) {
             setupSignals();
             // wait for input from stdin (or close), then toggle off
             getchar();
-            return setSystemProxy(true, false, @"", 0);
+            return toggleProxy(false);
         } else {
             usage(argv[0]);
         }
       
-      // code never reaches here, just avoids compiler from complaining.
-      return RET_NO_ERROR;
+        // code never reaches here, just avoids compiler from complaining.
+        return RET_NO_ERROR;
     }
-    return 0;
 }
+
